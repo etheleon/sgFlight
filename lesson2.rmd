@@ -1,0 +1,203 @@
+Analysis of SG Flight data
+====
+
+## Introduction
+We investigate recently released passenger entry count into Singapore.
+
+```{r echo=FALSE}
+opts_chunk$set(echo       = TRUE,
+               dpi        = 300,
+#               fig.width  = 8,
+#               fig.height = 5,
+               tidy       = TRUE)
+#opts_knit$set(root.dir="/export2/home/uesu/reDiamond")
+knit_hooks$set(webgl = hook_webgl, htmlcap = function(before, options, envir){
+  if(!before) {
+    paste('<center><p class="caption">',options$htmlcap,"</p></center>",sep="")
+    }
+    })
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(rgl)
+library(RColorBrewer)
+library(preprocessCore)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(igraph)
+theme_set(theme_bw())
+data = read.csv("singaporeFlights.csv")
+```
+
+```{r init, echo=FALSE}
+#Split date into year and mth 2000M05
+data$mth = substr(data$X, start = 6, stop = 7)
+data$yr  = substr(data$X, start = 1, stop = 4)
+
+df = data %>%
+        select(-c(TOTAL.REGIONS, X))
+rownames(df) = data$X
+df$date      = data$X
+
+df.long =   df %>%
+            gather(area, absCount, -c(date, mth,yr))
+```
+
+## Exploratory analyses
+We investigate how passenger numbers fluctuate in terms of 
+
+1. Months
+2. Months and Years
+
+```{r echo=FALSE, htmlcap="<b>Fig</b>: Boxplots showing human traffic grouped by month", fig.width=8}
+qplot(yr, log10(absCount), data = df.long, geom=c("boxplot", "jitter")) +
+        labs(x="year", y="Freq (log10)")
+```
+
+```{r echo=FALSE,htmlcap="<b>Fig</b>:Same Y scale", fig.width=8}
+qplot(date, absCount, data = df.long)      +
+        facet_wrap(~area)                  +
+        theme(axis.text.x=element_blank()) +
+        labs(x="Date", y="Absolute Count")
+
+```{r echo=FALSE, htmlcap="<b>Fig</b>: Free scale", fig.width=8}
+qplot(date, absCount, data = df.long)   +
+        facet_wrap(~area, scales='free')   +
+        theme(axis.text.x=element_blank()) +
+        labs(x="Date", y="Absolute Count")
+```
+
+```{r echo=FALSE, htmlcap="<b>Fig</b>: Grouped by Year", fig.width=8}
+byDate = df.long                  %>%
+            group_by(mth,yr,area) %>%
+            summarise(total = sum(absCount))
+
+qplot(area, total, data = byDate,geom="bar",stat="identity",fill=mth,position="dodge") +
+    facet_wrap(~yr)                                                                    +
+    theme(axis.text.x=element_text(angle=90))
+```
+
+## Quantile Normalisation
+We proceed to normalise the data, by manipulating the data.points to have the same quantiles.
+
+```{r, echo=FALSE}
+tonormalise      =  df.long                      %>%
+                    select(-date)                %>%
+                    spread(yr, absCount, fill=1)
+normalised       =  setNames(
+                    as.data.frame(normalize.quantiles(as.matrix(tonormalise[,-c(1,2)]))),
+                    colnames(tonormalise)[-c(1,2)]
+                    )
+newDF.long       =  cbind(tonormalise[,c(1,2)], normalised) %>% gather(year, count, -c(mth, area))
+newDF.long$date  =  paste0(newDF.long$year, newDF.long$mth)
+```
+
+```{r, htmlcap="<b>Fig</b>: Free scale", echo=FALSE}
+qplot(year, log10(count), data = newDF.long, geom="boxplot")
+```
+
+```{r, htmlcap="<b>Fig</b>: Free scale", echo=FALSE, fig.width=8}
+qplot(date, count, data = newDF.long) + facet_wrap(~area)
+```
+
+```{r, echo=FALSE}
+byDate.norm = newDF.long    %>%
+    select(-date)           %>%
+    group_by(mth,year,area) %>%
+    summarise(total = sum(count))
+```
+
+```{r, htmlcap="<b>Fig</b>: Free scale", echo=FALSE, fig.width=8}
+#qplot(area, total, data = byDate.norm,geom="bar",stat="identity",fill=mth,position="dodge")+
+#facet_wrap(~year)+theme(axis.text.x=element_text(angle=90))
+```
+
+```{r}
+newDF.wide = newDF.long %>% spread(area, count)
+```
+
+## Clustering
+
+We proceed next with clustering the regions,
+from which these passengers arrive into groups 
+based on how similar they are in terms of their frequencies.
+
+### 1. Hierarchical Clustering
+
+```{r echo=FALSE, }
+hc.regions =df                            %>%
+    select(SOUTH.EAST.ASIA:OTHER.REGIONS) %>%
+    t                                     %>%
+    scale                                 %>%
+    dist                                  %>%
+    hclust
+plot(hc.regions, xlab="Regions")
+```
+
+### 2. K-means
+
+We plot the elbow plot where we plot the within cluster sum of squares *K*.
+
+```{r echo=FALSE}
+wss = rep(0, 10)
+for (i in 2:12) 
+    wss[i] = sum(kmeans(t(newDF.wide[,-c(1,2,3)]), centers=i, nstart=100, iter.max=1000)$withinss)
+```
+
+```{r echo=FALSE, htmlcap="<b>Fig</b>: Elbow plot"}
+qplot(x=1:11, y=wss[-1], geom=c("point", "line")) +
+ylab("Within groups sum of squares")              +
+xlab("Number of centers")
+```
+
+From the graph, we see that the best k is 5.
+
+```{r echo=FALSE, message=FALSE}
+k               =  kmeans(x=t(df[,2:19]), center= 5, nstart =  25, iter.max=1000)
+kmeans.df       =  data.frame(k$cluster)
+kmeans.df$name  =  rownames(kmeans.df)
+kmeans.df$id    =  1:nrow(kmeans.df)
+kmeans.df$col   =  kmeans.df$k.cluster
+kmeans.df$col   =  factor(kmeans.df$col, labels= brewer.pal(n=5, name='Set3'))
+adjMatrix       =  matrix(rep(0,nrow(kmeans.df)*nrow(kmeans.df)), ncol=nrow(kmeans.df),nrow=nrow(kmeans.df))
+unique(kmeans.df$name) %>% sapply(function(namae){
+    row = subset(kmeans.df, name == namae)$id
+    col = subset(kmeans.df, k.cluster == subset(kmeans.df, name == namae)$k.cluster)$id
+    adjMatrix[row,col]<<-1
+    })
+```
+
+Presenting each cluster as a group in the network.
+
+```{r, echo=FALSE}
+plot(simplify(
+              graph.adjacency(adjmatrix=adjMatrix)),
+     vertex.label=kmeans.df$name, vertex.color=kmeans.df$col)
+```
+
+### Singular Vector Decomposition
+
+Finally, we apply SVD to the the data and look for the overarching patterns.
+
+```{r echo=FALSE, htmlcap="<b>Fig</b>: PC1"}
+svdObj = svd(scale(df %>% select(SOUTH.EAST.ASIA:OTHER.REGIONS)))
+grid.arrange(
+             qplot(1:length(svdObj$u[,1]), svdObj$u[,1], geom=c("point","line"))+labs(title="PC1"),
+             qplot(1:length(svdObj$u[,2]), svdObj$u[,2], geom=c("point","line"))+labs(title="PC2"),
+             qplot(1:length(svdObj$u[,3]), svdObj$u[,3], geom=c("point","line"))+labs(title="PC3")
+             )
+clus = kmeans(svdObj$v[,1:3], centers=3, nstart=25, iter.max=1000)$cluster
+```
+
+```{r webgl=TRUE, eval=TRUE, echo=FALSE}
+plot3d(svdObj$v[,1], svdObj$v[,2], svdObj$v[,3], size=10, col=clus)
+text3d(svdObj$v[,1:3], text=colnames(df)[1:19], cex = 1,col=clus)
+```
+
+```{r echo=FALSE, htmlcap="<b>Fig:</b>: Applying Hierarchical Clustering on PCS"}
+rownames(svdObj$v) <- colnames(df)[1:19]
+pca.hc = hclust(dist(svdObj$v[,1:3]))
+plot(pca.hc)
+```
